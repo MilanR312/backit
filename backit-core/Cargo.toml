@@ -1,0 +1,15 @@
+[package]
+name = "backit-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1.0.210", features = ["derive"] }
+cbor = "0.4.1"
+tokio-serde = { version = "0.9.0", features = ["cbor"] }
+tokio-util = { version = "0.7.12", features = ["codec"] }
+tokio = "1.40.0"
+futures-util = { version = "0.3.30", features = ["sink"] }
+interprocess = { version = "2.2.1", features = ["async", "tokio"] }
+uuid = { version = "1.10.0", features = ["serde", "v4"] }
+either = { version = "1.13.0", features = ["serde"] }
