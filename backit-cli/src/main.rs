@@ -1,13 +1,127 @@
 use std::{net::IpAddr, path::{Path, PathBuf}, str::FromStr};
 
 use backit_core::*;
-use bpaf::{any, choice, construct, long, positional, short, OptionParser, Parser};
-use ipc::{ConnectionType, FetchTarget, FileId, UserCommand};
+use ipc::{FetchTarget, FileId, UserCommand};
 use streams::{client, client_codec, StreamExt};
+use clap::{builder::ValueParser, command, Args, FromArgMatches, Parser, Subcommand};
 
+#[derive(Debug)]
+pub enum Credentials{
+    Password(String),
+    Key(String)
+}
+impl FromArgMatches for Credentials {
+    fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
+        Self::from_arg_matches_mut(&mut matches.clone())
+    }
+    fn from_arg_matches_mut(matches: &mut clap::ArgMatches) -> Result<Self, clap::Error> {
+        let password: Option<String> = matches.remove_one("password");
+        let key: Option<String> = matches.remove_one("key");
+        let out = match (password, key) {
+            (Some(x), None) => Self::Password(x),
+            (None, Some(x)) => Self::Key(x),
+            _ => unreachable!()
+        };
+        Ok(out)
+    }
+    fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
+        self.update_from_arg_matches_mut(&mut matches.clone())
+    }
+    fn update_from_arg_matches_mut(&mut self, matches: &mut clap::ArgMatches) -> Result<(), clap::Error> {
+        if matches.contains_id("password") {
+            *self = Self::Password(matches.remove_one("password").unwrap());
+        }
+        if matches.contains_id("key") {
+            *self = Self::Password(matches.remove_one("key").unwrap());
+        }
+        Ok(())
+    }
+}
+impl Args for Credentials {
+    fn group_id() -> Option<clap::Id> {
+        Some(clap::Id::from("Credentials"))
+    }
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        let cmd = cmd
+            .group(clap::ArgGroup::new("Credentials")
+                .multiple(false)
+                .required(true)
+                .args(
+                    [
+                        clap::Id::from("password"),
+                        clap::Id::from("key")
+                    ]
+                )
+            );
+        cmd
+            .arg({
+                let arg = clap::Arg::new("password")
+                    .value_name("PASSWORD")
+                    .value_parser({
+                        ValueParser::string()
+                    })  
+                    .action(clap::ArgAction::Set);
+                let arg = arg.short('p').long("password");
+                arg
+            })
+            .arg({
+                let arg = clap::Arg::new("key")
+                    .value_name("KEY")
+                    .value_parser({
+                        ValueParser::string()
+                    })  
+                    .action(clap::ArgAction::Set);
+                let arg = arg.short('k').long("key");
+                arg
+            })
+    }
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        cmd
+            .arg({
+                let arg = clap::Arg::new("password")
+                    .value_name("PASSWORD")
+                    .value_parser({
+                        ValueParser::string()
+                    })  
+                    .action(clap::ArgAction::Set);
+                let arg = arg.short('p').long("password");
+                arg.required(false)
+            })
+            .arg({
+                let arg = clap::Arg::new("key")
+                    .value_name("KEY")
+                    .value_parser({
+                        ValueParser::string()
+                    })  
+                    .action(clap::ArgAction::Set);
+                let arg = arg.short('k').long("key");
+                arg.required(false)
+            })
+    }
+}
 
+#[derive(Parser, Debug)]
+pub enum Backit{
+    Start,
+    Stop,
+    Reload,
 
+    Connect{
+        id: String,
+        #[clap(flatten)]
+        connection_type: Credentials,
+        nickname: Option<String>
+    }
+}
 
+#[derive(Args)]
+#[group(required = true, multiple = false)]
+struct X{
+    pass: Option<String>,
+    key: Option<String>
+}
+
+/*
 pub fn start() -> impl Parser<UserCommand>{
     construct!(UserCommand::Start{})
 }
@@ -135,15 +249,17 @@ pub fn cli() -> OptionParser<UserCommand>{
 
     construct!([start, stop, reload,  connect, disconnect,  host, unhost,  fetch, backup,  info, file_list]).to_options()
 }
-
+*/
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    let cli = cli().run();
+    /*let cli = cli().run();
     println!("cmd = {cli:?}");
     let client = client().await?;
     let mut client = client_codec(client);
     client.send(cli).await?;
     let returned = client.next().await.unwrap()?;
-    println!("reply = {returned:?}");
+    println!("reply = {returned:?}");*/
+    let a = Backit::parse();
+    println!("{a:?}");
     Ok(())
 }
