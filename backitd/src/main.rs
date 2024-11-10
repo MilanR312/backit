@@ -1,123 +1,129 @@
 use std::{collections::HashMap, ffi::OsString, io, path::PathBuf, time::Duration, u64};
 
-use backit_core::*;
-use futures::StreamExt;
-use ipc::{FileId, HostId, ServerInfo, UserCommand};
+use backit_core::{
+    ipc::{self, to_server::*},
+    streams::{client, client_codec, server, server_codec, ServerCodec, StreamExt},
+    SinkExt,
+};
+use interprocess::local_socket::traits::tokio::Listener;
+use ipc::ServerInfo;
 use libp2p::{swarm::SwarmEvent, Multiaddr};
-use streams::{server, server_codec, ServerCodec};
+use p2p::Client;
 use tracing_subscriber::EnvFilter;
 
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    try_join,
+    spawn, try_join,
 };
 
 
-pub struct Config{}
+pub mod p2p;
+
+pub struct Config {}
 
 pub(crate) fn config_path() -> PathBuf {
     todo!()
 }
-
-pub struct Server{
+pub struct Server {
     user_commands: ipc::Listener,
-    hosted_files: HashMap<FileId, PathBuf>,
+    hosted_files: HashMap<FileTarget, PathBuf>,
     connected_clients: HashMap<HostId, ()>,
     active: bool,
-    config: Config
+    config: Config,
+    client: Client
 }
 impl Server {
-    pub fn new() -> io::Result<Self> {
+    pub fn new(client: Client) -> io::Result<Self> {
         Ok(Self {
             user_commands: server()?,
             hosted_files: HashMap::new(),
             active: false,
-            config: Config {  }
+            config: Config {},
+            connected_clients: HashMap::new(),
+            client
         })
     }
-    pub fn start(&mut self){
-        self.active = true;
-    }
-    pub fn stop(&mut self){
-        self.active = false;
-    }
-    pub fn reload(&mut self) {
-        self.config = Config{};
-    }
-    pub fn connect(&mut self, hostid: HostId) {
-        self.connected_clients.insert(hostid, ());
-    }
-    pub fn disconnect(&mut self, hostid: HostId) {
-        self.connected_clients.remove(&hostid);
-    }
-    pub fn host_file(&mut self, file: PathBuf, nickname: Option<String>) -> FileId {
-        let name = nickname.map(|x| x.into()).unwrap_or(file.clone().into_os_string());
-        let file_id = FileId::new(name);
-        dbg!(&file_id);
-        self.hosted_files.insert(file_id.clone(), file);
-        file_id
-    }
-    pub fn unhost_file(&mut self, file_id: FileId) {
-        self.hosted_files.remove(&file_id);
-    }
-    pub fn fetch(&mut self, host_id: HostId){}
-  
-    pub fn backup(&mut self){}
-    pub fn info(&self, host: Option<HostId>) -> ServerInfo{
-        match host {
-            None => {
-                ServerInfo::new(self.connected_clients.len(), self.hosted_files.len())
-            },
-            _ => {
-                todo!()
-            }
-        }
-    }
-    pub fn file_list(&self){}
 
-    pub async fn handle_user_command(&mut self, command: UserCommand, codec: &mut ServerCodec<ipc::Stream>) -> io::Result<()>{
-        match command {
-            UserCommand::Start => self.start(),
-            UserCommand::Stop => self.stop(),
-            UserCommand::Reload => self.reload(),
-            UserCommand::Connect { id, connection_type, nickname }
-                => todo!(),
-            UserCommand::Disconnect { id } => self.disconnect(id),
-            _ => {}
+    pub fn server_info(&self) -> ServerInfo {
+        ServerInfo::new(self.active, self.hosted_files.len())
+    }
+
+    pub async fn handle_user_command(
+        &mut self,
+        backit: Backit,
+        codec: &mut ServerCodec<ipc::Stream>,
+    ) -> io::Result<()> {
+        use ipc::ServerError as SE;
+        use ipc::ServerReply as SR;
+        match backit.command() {
+            Command::Start => {
+                self.active = true;
+                codec.send(SR::Started).await?;
+            }
+            Command::Stop => {
+                self.active = false;
+                codec.send(SR::Stopped).await?;
+            }
+            Command::Reload => {
+                todo!();
+                codec.send(SR::Error(SE::NotImplemented)).await?;
+            }
+
+            Command::ServerStatus(None) => {
+                codec.send(SR::Info(self.server_info())).await?;
+            }
+            Command::ServerStatus(Some(x)) => {
+                
+            }
+            _ => {
+                if !backit.no_confirm() {
+                    codec
+                        .send(ipc::ServerReply::Error(ipc::ServerError::InvalidPacket))
+                        .await?;
+                }
+            }
         }
         Ok(())
     }
 
-    pub async fn handle_command(&mut self) -> io::Result<()>{
+    pub async fn handle_command(&mut self) -> io::Result<()> {
         let connection = self.user_commands.accept().await?;
         let mut codec = server_codec(connection);
-        while let Some(x) = codec.next().await{
+        while let Some(x) = codec.next().await {
+            println!("got request {:?}", x);
             match x {
                 Ok(x) => {
                     self.handle_user_command(x, &mut codec).await?;
-                },
+                }
                 Err(e) => {
-                    codec.send(ipc::ServerReply::Error(ipc::ServerError::InvalidPacket)).await?;
+                    codec
+                        .send(ipc::ServerReply::Error(ipc::ServerError::InvalidPacket))
+                        .await?;
                 }
             };
         }
-        println!("finished");
         Ok(())
     }
 }
-
 
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     tracing_subscriber::fmt().init();
 
-    let mut server = Server::new()?;
+    /*let mut server = Server::new()?;
     loop {
         server.handle_command().await?;
-    }
+    }*/
+    let (mut event_loop, client) = p2p::EventLoop::new()?;
 
-    
+    spawn(async move {
+        event_loop.run().await;
+    });
+    let mut server = Server::new(client)?;
+    loop {
+        server.handle_command();
+    }
+    client.start_listening().await;
 
     Ok(())
-
 }

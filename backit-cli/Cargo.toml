@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+bpaf = { version = "0.9.14", features = ["bright-color", "autocomplete"] }
 backit-core = { path = "../backit-core" }
-bpaf = "0.9.14"
-clap = { version = "4.5.19", features = ["derive"] }
 eyre = "0.6.12"
 tokio = { version = "1.40.0", features = ["full"] }

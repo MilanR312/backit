@@ -1,124 +1,211 @@
-use std::{net::IpAddr, path::{Path, PathBuf}, str::FromStr};
+use std::{
+    alloc::Layout,
+    net::IpAddr,
+    path::{Path, PathBuf},
+    str::FromStr,
+};
 
-use backit_core::*;
-use ipc::{FetchTarget, FileId, UserCommand};
-use streams::{client, client_codec, StreamExt};
-use clap::{builder::ValueParser, command, Args, FromArgMatches, Parser, Subcommand};
+use backit_core::{
+    ipc::to_server::*,
+    streams::{client, client_codec, StreamExt},
+    SinkExt,
+};
+use bpaf::{any, construct, long, positional, pure, short, Parser};
 
-#[derive(Debug)]
-pub enum Credentials{
-    Password(String),
-    Key(String)
+fn credentials() -> impl Parser<Credentials> {
+    let key = short('k')
+        .long("key")
+        .argument("KEY")
+        .map(|x| Credentials::new_key(x));
+    let url = short('u')
+        .long("url")
+        .argument("URL")
+        .map(|x| Credentials::new_url(x));
+
+    let id = positional("ID");
+    let password = positional("PASSWORD");
+    let password = construct!(Credentials::Password { id, password });
+    construct!([key, url, password])
 }
-impl FromArgMatches for Credentials {
+
+fn host_id() -> impl Parser<HostId> {
+    // this will always match the nickname but it doesnt really matter since both are strings
+    // defining both makes the bpaf help look better
+    let nickname = positional("HOST_NICK").map(|x| HostId::new_nickname(x));
+    let id = positional("ID").map(|x| HostId::new_id(x));
+    construct!([nickname, id])
+}
+
+fn file_target() -> impl Parser<FileTarget> {
+    let dir = short('r')
+        .long("recursive")
+        .argument("DIR")
+        .map(|x| FileTarget::Dir { path: x });
+    let path = positional("FILE");
+    let nickname = short('n').long("nickname").argument("NICKNAME").optional();
+    let file = construct!(FileTarget::File { nickname, path });
+    construct!([dir, file])
+}
+
+/*
+impl Target {
+    pub fn nickname_arg() -> Arg {
+        Arg::new("nickname")
+            .value_name("NICKNAME")
+            .value_parser(ValueParser::string())
+            .conflicts_with("tags")
+    }
+    pub fn tags_arg() -> Arg {
+        Arg::new("tags")
+            .value_name("TAGS")
+            .short('t')
+            .value_parser(ValueParser::string())
+            .conflicts_with("nickname")
+    }
+}
+impl FromArgMatches for Target {
     fn from_arg_matches(matches: &clap::ArgMatches) -> Result<Self, clap::Error> {
         Self::from_arg_matches_mut(&mut matches.clone())
     }
     fn from_arg_matches_mut(matches: &mut clap::ArgMatches) -> Result<Self, clap::Error> {
-        let password: Option<String> = matches.remove_one("password");
-        let key: Option<String> = matches.remove_one("key");
-        let out = match (password, key) {
-            (Some(x), None) => Self::Password(x),
-            (None, Some(x)) => Self::Key(x),
-            _ => unreachable!()
-        };
-        Ok(out)
+        if let Some(tags) = matches.remove_many::<String>("tags") {
+            return Ok(Self::Tags(tags.collect()));
+        }
+        if let Some(nickname) = matches.remove_one("nickname") {
+            return Ok(Self::Nickname(nickname));
+        }
+        unreachable!()
     }
     fn update_from_arg_matches(&mut self, matches: &clap::ArgMatches) -> Result<(), clap::Error> {
         self.update_from_arg_matches_mut(&mut matches.clone())
     }
-    fn update_from_arg_matches_mut(&mut self, matches: &mut clap::ArgMatches) -> Result<(), clap::Error> {
-        if matches.contains_id("password") {
-            *self = Self::Password(matches.remove_one("password").unwrap());
+    fn update_from_arg_matches_mut(
+        &mut self,
+        matches: &mut clap::ArgMatches,
+    ) -> Result<(), clap::Error> {
+        if matches.contains_id("tags") {
+            *self = Self::Tags(matches.remove_many("tags").unwrap().collect())
         }
-        if matches.contains_id("key") {
-            *self = Self::Password(matches.remove_one("key").unwrap());
+        if matches.contains_id("nickname") {
+            *self = Self::Nickname(matches.remove_one("nickname").unwrap());
         }
         Ok(())
     }
 }
-impl Args for Credentials {
+impl Args for Target {
     fn group_id() -> Option<clap::Id> {
-        Some(clap::Id::from("Credentials"))
+        Some(clap::Id::from("Target"))
     }
     fn augment_args(cmd: clap::Command) -> clap::Command {
-        let cmd = cmd
-            .group(clap::ArgGroup::new("Credentials")
+        let cmd = cmd.group(
+            clap::ArgGroup::new("Target")
                 .multiple(false)
                 .required(true)
-                .args(
-                    [
-                        clap::Id::from("password"),
-                        clap::Id::from("key")
-                    ]
-                )
-            );
-        cmd
-            .arg({
-                let arg = clap::Arg::new("password")
-                    .value_name("PASSWORD")
-                    .value_parser({
-                        ValueParser::string()
-                    })  
-                    .action(clap::ArgAction::Set);
-                let arg = arg.short('p').long("password");
-                arg
-            })
-            .arg({
-                let arg = clap::Arg::new("key")
-                    .value_name("KEY")
-                    .value_parser({
-                        ValueParser::string()
-                    })  
-                    .action(clap::ArgAction::Set);
-                let arg = arg.short('k').long("key");
-                arg
-            })
+                .args(["nickname", "tags"]),
+        );
+        cmd.arg(Self::nickname_arg()).arg(Self::tags_arg())
     }
     fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
-        cmd
-            .arg({
-                let arg = clap::Arg::new("password")
-                    .value_name("PASSWORD")
-                    .value_parser({
-                        ValueParser::string()
-                    })  
-                    .action(clap::ArgAction::Set);
-                let arg = arg.short('p').long("password");
-                arg.required(false)
-            })
-            .arg({
-                let arg = clap::Arg::new("key")
-                    .value_name("KEY")
-                    .value_parser({
-                        ValueParser::string()
-                    })  
-                    .action(clap::ArgAction::Set);
-                let arg = arg.short('k').long("key");
-                arg.required(false)
-            })
+        cmd.arg(Self::nickname_arg().required(false))
+            .arg(Self::tags_arg().required(false))
     }
 }
-
-#[derive(Parser, Debug)]
-pub enum Backit{
-    Start,
-    Stop,
-    Reload,
-
-    Connect{
-        id: String,
-        #[clap(flatten)]
-        connection_type: Credentials,
-        nickname: Option<String>
-    }
+*/
+fn target() -> impl Parser<Target> {
+    //let nickname = positional("NICKNAME").map(|x| Target::Nickname(x));
+    let nickname = short('n')
+        .long("nickname")
+        .argument("NICKNAME")
+        .map(|x| Target::Nickname(x));
+    let tags = short('t')
+        .long("tags")
+        .argument("TAGS")
+        .some("must be at least 1 tag supplied")
+        .map(|x| Target::Tags(x));
+    construct!([tags, nickname])
 }
 
-#[derive(Args)]
-#[group(required = true, multiple = false)]
-struct X{
-    pass: Option<String>,
-    key: Option<String>
+fn any_host() -> impl Parser<AnyHost> {
+    let host_id = host_id().map(|x| AnyHost::HostId(x));
+    let credentials = credentials().map(|x| AnyHost::Credentials(x));
+    construct!([host_id, credentials])
+}
+
+fn backit() -> impl Parser<Backit> {
+    struct LocalBackit {
+        command: Command,
+        json: bool,
+        no_confirm: bool,
+    }
+    const _: () = assert!(size_of::<LocalBackit>() == size_of::<Backit>());
+    const _: () = assert!(Layout::new::<LocalBackit>().align() == Layout::new::<Backit>().align());
+    let command = command();
+    let json = long("json").switch();
+    let no_confirm = long("no-confirm").switch();
+
+    construct!(LocalBackit {
+        json,
+        no_confirm,
+        command
+    })
+    .map(|x| Backit::new(x.command, x.json, x.no_confirm))
+}
+fn command() -> impl Parser<Command> {
+    let start = construct!(Command::Start {}).to_options().command("start");
+    let stop = pure(Command::Stop).to_options().command("stop");
+    let reload = pure(Command::Reload).to_options().command("reload");
+
+    let connection_type = credentials();
+    let nickname = short('n').long("nickname").argument("NICKNAME").optional();
+    let connect = construct!(Command::Connect {
+        nickname,
+        connection_type
+    })
+    .to_options()
+    .command("connect");
+
+    let host_id = host_id();
+    let disconnect = construct!(Command::Disconnect(host_id))
+        .to_options()
+        .command("disconnect");
+
+    let host = {
+        let target = file_target();
+        let tags = short('t').long("tags").argument("TAGS").many();
+        construct!(Command::Host { tags, target })
+            .to_options()
+            .command("host")
+    };
+
+    let unhost = target().some("must be at least 1 target supplied");
+    let unhost = construct!(Command::Unhost(unhost))
+        .to_options()
+        .command("unhost");
+
+    let fetch = {
+        let host = any_host();
+        let target = target();
+        construct!(Command::Fetch { target, host })
+            .to_options()
+            .command("fetch")
+    };
+
+    let push = {
+        let host = any_host();
+        let target = target();
+        construct!(Command::Push { target, host })
+            .to_options()
+            .command("push")
+    };
+
+    let status = {
+        let host = any_host().optional();
+        construct!(Command::ServerStatus(host))
+            .to_options()
+            .command("status")
+    };
+
+    construct!([start, stop, reload, connect, disconnect, host, unhost, fetch, push, status])
 }
 
 /*
@@ -156,7 +243,7 @@ pub fn disconnect() -> impl Parser<UserCommand>{
         .map(|x| ipc::HostId::NickName(x));
     let id = construct!([id, nick]);
     construct!(UserCommand::Disconnect{ id  })
-} 
+}
 
 pub fn host() -> impl Parser<UserCommand>{
     let path = positional("FNAME")
@@ -242,7 +329,7 @@ pub fn cli() -> OptionParser<UserCommand>{
     let fetch = fetch().to_options().descr("fetch a file").command("fetch");
     //TODO: add option for move to pc?
     let backup = backup().to_options().descr("backs up a file").command("backit");
-    
+
     let info = info().to_options().descr("info for a host").command("info");
     let file_list = file_list().to_options().descr("list info for a file").command("list");
 
@@ -252,14 +339,15 @@ pub fn cli() -> OptionParser<UserCommand>{
 */
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
-    /*let cli = cli().run();
-    println!("cmd = {cli:?}");
+    let backit = backit().to_options().run();
+    println!("cmd = {backit:#?}");
     let client = client().await?;
     let mut client = client_codec(client);
-    client.send(cli).await?;
-    let returned = client.next().await.unwrap()?;
-    println!("reply = {returned:?}");*/
-    let a = Backit::parse();
-    println!("{a:?}");
+    let expects_reply = !backit.no_confirm();
+    client.send(backit).await?;
+    if expects_reply {
+        let returned = client.next().await.unwrap()?;
+        println!("reply = {returned:?}");
+    }
     Ok(())
 }

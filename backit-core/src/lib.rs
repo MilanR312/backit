@@ -1,174 +1,224 @@
 use std::{net::IpAddr, path::PathBuf};
 
 pub use futures_util::SinkExt;
-use interprocess::local_socket::{tokio::Listener, traits::tokio::Stream, GenericFilePath, GenericNamespaced, Name, NameType, ToFsName, ToNsName};
+pub use interprocess::local_socket::tokio::prelude::*;
+use interprocess::local_socket::{
+    tokio::Listener, traits::tokio::Stream, GenericFilePath, GenericNamespaced, Name, NameType,
+    ToFsName, ToNsName,
+};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncWrite};
 pub use tokio_serde::Framed;
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
-pub use interprocess::local_socket::tokio::prelude::*;
 use uuid::Uuid;
 
 pub mod streams;
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct DeviceName{
+pub struct DeviceName {
     name: Option<String>,
-    id: Uuid
+    id: Uuid,
 }
 
-
-pub mod ipc{
+pub mod ipc {
     pub type Listener = interprocess::local_socket::tokio::Listener;
     pub type Stream = interprocess::local_socket::tokio::Stream;
-    use std::{ffi::{OsStr, OsString}, net::IpAddr, path::PathBuf};
+    use std::{
+        ffi::{OsStr, OsString},
+        net::IpAddr,
+        path::PathBuf,
+    };
 
     use either::Either;
+    use from_client::*;
     use serde::{Deserialize, Serialize};
     use uuid::Uuid;
 
-    #[derive(Debug, Clone, Serialize, Deserialize, Hash, PartialEq, Eq, PartialOrd, Ord)]
-    pub enum HostId{
-        NickName(String),
-        Id(Uuid)
+    pub mod to_server {
+        pub use super::from_client::*;
     }
-    #[derive(Hash, PartialEq, Eq, PartialOrd, Ord, Debug, Clone, Serialize, Deserialize)]
-    pub struct  FileId{
-        /// can be either a path or the nickname, if the nickname exists it will prioritise it
-        inner: OsString
-    }
-    impl FileId {
-        pub fn new(data: OsString) -> Self {
-            Self {
-                inner: data
+    pub(crate) mod from_client {
+        use std::path::PathBuf;
+
+        use serde::{Deserialize, Serialize};
+
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum Credentials {
+            /// a single use key used to identify and connect to a remote client
+            Key(String),
+            Url(String),
+            Password {
+                id: String,
+                password: String,
+            },
+        }
+        impl Credentials {
+            pub fn new_key(key: String) -> Self {
+                Self::Key(key)
+            }
+            pub fn new_url(url: String) -> Self {
+                Self::Url(url)
+            }
+            pub fn new_password(id: String, password: String) -> Self {
+                Self::Password { id, password }
             }
         }
-        pub fn data(&self) -> &OsStr {
-            &self.inner
+        /// an id for a host, kan be either a nickname or an id
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub struct HostId {
+            nickname_or_id: String,
+        }
+        impl HostId {
+            pub fn new_nickname(nickname: String) -> Self {
+                Self {
+                    nickname_or_id: nickname,
+                }
+            }
+            pub fn new_id(id: String) -> Self {
+                Self { nickname_or_id: id }
+            }
+        }
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum FileTarget {
+            File {
+                path: PathBuf,
+                nickname: Option<String>,
+            },
+            Dir {
+                path: PathBuf,
+            },
+        }
+        impl FileTarget {
+            pub fn new_file(path: PathBuf, nickname: Option<String>) -> Self {
+                Self::File { path, nickname }
+            }
+            pub fn new_dir(path: PathBuf) -> Self {
+                Self::Dir { path }
+            }
         }
 
-    }
-    #[derive(Debug, Deserialize, Serialize, Clone)]
-    pub enum ConnectionType{
-        Password(String),
-        Key(Uuid)
-    }
-    #[derive(Debug, Deserialize, Serialize, Clone)]
-    pub enum FetchTarget{
-        Backup(String),
-        File(PathBuf)
-    }
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum Target {
+            Nickname(String),
+            Tags(Vec<String>),
+        }
+        impl Target {
+            pub fn new_nickname(nickname: String) -> Self {
+                Self::Nickname(nickname)
+            }
+            pub fn new_tags(tags: Vec<String>) -> Self {
+                Self::Tags(tags)
+            }
+        }
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum AnyHost {
+            HostId(HostId),
+            Credentials(Credentials),
+        }
+        impl AnyHost {
+            pub fn new_host_id(host_id: HostId) -> Self {
+                Self::HostId(host_id)
+            }
+            pub fn new_credentials(credentials: Credentials) -> Self {
+                Self::Credentials(credentials)
+            }
+        }
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum Command {
+            Start,
+            Stop,
+            Reload,
+            /// connect to a new host and set an optional nickname
+            ///
+            /// priority for set name is credentials < host_name (in config) < nickname
+            Connect {
+                connection_type: Credentials,
+                nickname: Option<String>,
+            },
+            Disconnect(HostId),
 
-    #[derive(Debug,Serialize,Deserialize)]
-    pub struct ServerInfo{
-        connected_count: usize,
-        hosted_file_count: usize
-    }
-    impl ServerInfo {
-        pub fn new(connected_count: usize, hosted_file_count: usize) -> Self {
-            Self {
-                connected_count,
-                hosted_file_count
+            Host {
+                target: FileTarget,
+                tags: Vec<String>,
+            },
+            Unhost(Vec<Target>),
+
+            Fetch {
+                host: AnyHost,
+                target: Target,
+            },
+            Push {
+                host: AnyHost,
+                target: Target,
+            },
+            // Backup
+            ServerStatus(Option<AnyHost>),
+        }
+        #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+        pub struct Backit {
+            command: Command,
+            json: bool,
+            no_confirm: bool,
+        }
+        impl Backit {
+            pub fn new(command: Command, json: bool, no_confirm: bool) -> Self {
+                Self {
+                    command,
+                    json,
+                    no_confirm,
+                }
+            }
+            pub fn no_confirm(&self) -> bool {
+                self.no_confirm
+            }
+            pub fn command(&self) -> &Command {
+                &self.command
             }
         }
     }
-    #[derive(Debug,Serialize,Deserialize)]
-    pub struct FileInfo{
-    }
 
-    #[derive(Serialize, Deserialize, Debug, Clone)]
-    pub enum UserCommand{
-        /// start hosting files
-        Start,
-        /// stop hosting files, does not shut down the deamon
-        Stop,
-        Reload,
-
-        Connect {
-            id: Uuid,
-            connection_type: ConnectionType,
-            nickname: Option<String>
-        },
-        Disconnect {
-            id: HostId,
-        },
-
-    
-        HostFile{
-            path: PathBuf,
-            dir: bool,
-            nickname: Option<String>
-        },
-        UnHostFile(FileId),
-
-        Fetch{
-            host: HostId,
-            target: FetchTarget
-        },
-        Backup{
-            path: PathBuf,
-            compression: Option<String>,
-            schedule: String,
-            host: HostId
-        },
-        Info {
-            host: Option<HostId>
-        },
-        FileList{
-            host: Option<HostId>
-        }
-    }
-    
-    
     #[derive(Serialize, Deserialize, Debug)]
-    pub enum ServerError{
-        InvalidPacket
+    pub enum ServerError {
+        InvalidPacket,
+        NotImplemented,
     }
-    
+
     #[derive(Serialize, Deserialize, Debug)]
-    pub enum ServerReply{
+    pub enum ServerReply {
         Started,
         Stopped,
         Reloaded,
 
-        Connected(HostId),
+        Connected(Option<String>),
         Disconnect,
 
-        HostFile(FileId),
+        HostFile(FileTarget),
         UnHostFile,
 
         Fetched(Vec<u8>),
         Backuped,
 
         Info(ServerInfo),
-        FileList(FileInfo),
-
-        Error(ServerError)
+        //FileList(FileInfo),
+        Error(ServerError),
     }
-}
-
-
-#[derive(Serialize, Deserialize)]
-pub struct HostedFile{
-    file: PathBuf,
-    uuid: Uuid
-}
-impl HostedFile {
-    pub fn new(file: PathBuf) -> Self {
-        Self {
-            file,
-            uuid: Uuid::new_v4()
+    #[derive(Debug, Serialize, Deserialize, Clone)]
+    pub struct ServerInfo {
+        active: bool,
+        file_count: usize,
+    }
+    impl ServerInfo {
+        pub fn new(active: bool, file_count: usize) -> Self {
+            Self { active, file_count }
         }
     }
 }
-#[derive(Serialize, Deserialize)]
-pub struct HostedFileData{
-    len: usize,
+
+pub mod tcp {
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum SendPacket {}
+    #[derive(Serialize, Deserialize, Debug)]
+    pub enum ReceivePacket {}
 }
-
-
-
-
-
-
-
